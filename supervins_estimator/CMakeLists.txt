@@ -18,8 +18,8 @@ find_package(catkin REQUIRED COMPONENTS
     image_transport)
 
 find_package(OpenCV REQUIRED)
-find_package(Ceres REQUIRED PATHS "/home/lhk/Thirdparty/Ceres")
-set(ONNXRUNTIME_ROOTDIR "/home/lhk/Thirdparty/onnxruntime")
+find_package(Ceres REQUIRED)
+set(ONNXRUNTIME_ROOTDIR "/usr/local/onnxruntime")
 include_directories("${ONNXRUNTIME_ROOTDIR}/include")
 link_directories("${ONNXRUNTIME_ROOTDIR}/lib")
 

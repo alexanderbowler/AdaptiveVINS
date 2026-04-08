@@ -11,6 +11,7 @@
  
 #include <thread>
 #include <mutex>
+#include <sys/stat.h>
 #include <std_msgs/Header.h>
 #include <std_msgs/Float32.h>
 #include <ceres/ceres.h>

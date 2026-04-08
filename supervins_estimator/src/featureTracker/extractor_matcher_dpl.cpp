@@ -16,8 +16,8 @@ void Extractor_DPL::initialize(std::string extractorPath, int extractor_type_)
     cuda_options.device_id = 0;
     cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
     cuda_options.gpu_mem_limit = 0;
-    cuda_options.arena_extend_strategy = 1;     // 设置GPU内存管理中的Arena扩展策略
-    cuda_options.do_copy_in_default_stream = 1; // 是否在默认CUDA流中执行数据复制
+    cuda_options.arena_extend_strategy = 1;     // Arena extension strategy for GPU memory management
+    cuda_options.do_copy_in_default_stream = 1; // Whether to copy data in the default CUDA stream
     cuda_options.has_user_compute_stream = 0;
     cuda_options.default_memory_arena_cfg = nullptr;
 
@@ -160,8 +160,8 @@ void Matcher_DPL::initialize(std::string matcherPath,int extractor_type_, float 
     cuda_options.device_id = 0;
     cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
     cuda_options.gpu_mem_limit = 0;
-    cuda_options.arena_extend_strategy = 1;     // 设置GPU内存管理中的Arena扩展策略
-    cuda_options.do_copy_in_default_stream = 1; // 是否在默认CUDA流中执行数据复制
+    cuda_options.arena_extend_strategy = 1;     // Arena extension strategy for GPU memory management
+    cuda_options.do_copy_in_default_stream = 1; // Whether to copy data in the default CUDA stream
     cuda_options.has_user_compute_stream = 0;
     cuda_options.default_memory_arena_cfg = nullptr;
 

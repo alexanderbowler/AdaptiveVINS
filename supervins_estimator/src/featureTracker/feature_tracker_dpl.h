@@ -84,6 +84,10 @@ public:
     int n_id;
     bool hasPrediction;
 
+    // Per-frame timing (milliseconds); populated by trackImage_dpl(), read by estimator
+    double last_extraction_ms = 0.0;
+    double last_matching_ms   = 0.0;
+
     int extractor_type = 0;
     int descriptor_size = 256;
     unsigned int IMAGE_SIZE_DPL=512; 

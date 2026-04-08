@@ -14,7 +14,7 @@ find_package(catkin REQUIRED COMPONENTS
     roslib
     )
 find_package(Ceres REQUIRED)
-find_package(Ceres REQUIRED PATHS "/home/lhk/Thirdparty/Ceres")
+find_package(Ceres REQUIRED)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 find_package(Eigen3)
 
@@ -24,7 +24,7 @@ option(onnxruntime_USE_TENSORRT "Build with TensorRT support" OFF)
 option(LIBPNG_ROOTDIR "libpng root dir")
 option(ONNXRUNTIME_ROOTDIR "onnxruntime root dir")
 
-set(ONNXRUNTIME_ROOTDIR "/home/lhk/Thirdparty/onnxruntime")
+set(ONNXRUNTIME_ROOTDIR "/usr/local/onnxruntime")
 include_directories("${ONNXRUNTIME_ROOTDIR}/include")
 link_directories("${ONNXRUNTIME_ROOTDIR}/lib")
 
