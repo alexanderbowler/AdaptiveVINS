@@ -112,8 +112,13 @@ class Estimator
     std::thread processThread;
 
     //VINS-Fusion中将特征追踪器放入了estimator中，不再单独使用一个节点发布特征提取和追踪结果
-    // FeatureTracker featureTracker;
-    FeatureTrackerDPL featureTracker; // deep-learning based feature tracker, but still can use original functions
+    FeatureTrackerDPL featureTracker;          // deep front-end: SuperPoint + LightGlue
+    FeatureTracker    featureTrackerClassical; // classical front-end: FAST + optical flow
+
+    // Hardcoded front-end selector.
+    // true  = deep (SuperPoint + LightGlue)
+    // false = classical (FAST + optical flow)
+    bool use_deep_frontend = false;
 
     SolverFlag solver_flag;
     MarginalizationFlag  marginalization_flag;

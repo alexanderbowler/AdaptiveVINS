@@ -82,5 +82,7 @@ public:
     int n_id;
     bool hasPrediction;
 
-    // lightglue
+    // Per-frame timing (milliseconds); populated by trackImage(), read by estimator
+    double last_extraction_ms = 0.0;
+    double last_matching_ms   = 0.0;
 };

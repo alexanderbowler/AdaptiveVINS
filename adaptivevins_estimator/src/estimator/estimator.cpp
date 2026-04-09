@@ -110,11 +110,16 @@ void Estimator::setParameter()
     td = TD;
     g = G;
     cout << "set g " << g.transpose() << endl;
+    // Initialize deep front-end
     featureTracker.readIntrinsicParameter(CAM_NAMES);
-    // new codes: initialize deep learning extractor and matcher
-    //  string extractorDPL_path = "/home/lhk/catkin_ws/src/VINS-Fusion-LightGlue/vins_estimator/weights_dpl/superpoint.onnx";
-    //  string matcherDPL_path = "/home/lhk/catkin_ws/src/VINS-Fusion-LightGlue/vins_estimator/weights_dpl/superpoint_lightglue_fused_cpu.onnx";
-    featureTracker.initializeExtractorMatcher(0, extractor_weight_global_path, matcher_weight_global_path, MATCHER_THRESHOLD); // initialize deep-learning based extractor and matcher
+    featureTracker.initializeExtractorMatcher(0, extractor_weight_global_path, matcher_weight_global_path, MATCHER_THRESHOLD);
+
+    // Initialize classical front-end
+    // NOTE: each tracker has its own n_id counter starting at 0.
+    // With a hardcoded switch this is safe (only one tracker runs per session).
+    // For dynamic switching, assign featureTrackerClassical.n_id an offset (e.g. 1,000,000)
+    // to prevent feature ID collisions across the two trackers.
+    featureTrackerClassical.readIntrinsicParameter(CAM_NAMES);
 
     std::cout << "MULTIPLE_THREAD is " << MULTIPLE_THREAD << '\n';
     if (MULTIPLE_THREAD && !initThreadFlag)
@@ -166,62 +171,61 @@ void Estimator::changeSensorType(int use_imu, int use_stereo)
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 {
     inputImageCnt++;
+
+    // Hardcoded mid-bag front-end swap for validation.
+    // Change SWAP_AT to adjust when the switch occurs.
+    static const int SWAP_AT = 1400;
+    static bool swap_done = false;
+    if (!swap_done && inputImageCnt == SWAP_AT)
+    {
+        use_deep_frontend = !use_deep_frontend;
+        swap_done = true;
+        // Forward the new tracker's n_id past the old tracker's to prevent
+        // feature ID collisions in the sliding window.
+        if (use_deep_frontend)
+            featureTracker.n_id = featureTrackerClassical.n_id + 1;
+        else
+            featureTrackerClassical.n_id = featureTracker.n_id + 1;
+        ROS_WARN("AdaptiveVINS: front-end SWAP at image %d -> %s",
+                 inputImageCnt,
+                 use_deep_frontend ? "DEEP (SuperPoint+LightGlue)" : "CLASSICAL (FAST+optical flow)");
+    }
+
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
-    // If right image is missing, track left image only
-    if (_img1.empty())
+
+    if (use_deep_frontend)
     {
-        featureFrame = featureTracker.trackImage_dpl(t, _img);
+        // --- Deep front-end: SuperPoint + LightGlue ---
+        if (_img1.empty())
+            featureFrame = featureTracker.trackImage_dpl(t, _img);
+        else
+            featureFrame = featureTracker.trackImage_dpl(t, _img, _img1);
 
-        // Save descriptors as cv::Mat
+        // Buffer SuperPoint descriptors (used by loop closure)
         vector<pair<cv::Point2f, vector<float>>> kptAndDescriptors = featureTracker.cur_dplpts_descriptors;
-
-        std::cout << std::fixed << std::setprecision(9) << t << std::endl;
-
         cv::Mat descriptors(kptAndDescriptors.size(), 256, CV_32FC1);
-
-        for (int i = 0; i < kptAndDescriptors.size(); i++)
-        {
+        for (int i = 0; i < (int)kptAndDescriptors.size(); i++)
             for (int j = 0; j < 256; j++)
-            {
                 descriptors.at<float>(i, j) = kptAndDescriptors[i].second[j];
-            }
-        }
-
-        pair<double, cv::Mat> superPointDescriptors = make_pair(t, descriptors);
-
-        // Push SuperPoint descriptors to buffer
         mSuperPointDescriptors.lock();
         SuperPointDescriptorsBuf.push(make_pair(t, descriptors));
         mSuperPointDescriptors.unlock();
     }
     else
     {
-        featureFrame = featureTracker.trackImage_dpl(t, _img, _img1);
-
-        // Stereo: same descriptor handling, push to buffer
-        vector<pair<cv::Point2f, vector<float>>> kptAndDescriptors = featureTracker.cur_dplpts_descriptors;
-
-        cv::Mat descriptors(kptAndDescriptors.size(), 256, CV_32FC1);
-
-        for (int i = 0; i < kptAndDescriptors.size(); i++)
-        {
-            for (int j = 0; j < 256; j++)
-            {
-                descriptors.at<float>(i, j) = kptAndDescriptors[i].second[j];
-            }
-        }
-
-        // Push SuperPoint descriptors to buffer
-        mSuperPointDescriptors.lock();
-        SuperPointDescriptorsBuf.push(make_pair(t, descriptors));
-        mSuperPointDescriptors.unlock();
+        // --- Classical front-end: FAST + optical flow ---
+        // No descriptor buffering (loop closure disabled in classical mode)
+        if (_img1.empty())
+            featureFrame = featureTrackerClassical.trackImage(t, _img);
+        else
+            featureFrame = featureTrackerClassical.trackImage(t, _img, _img1);
     }
 
     if (SHOW_TRACK)
     {
-        // Publish tracking visualization
-        cv::Mat imgTrack = featureTracker.getTrackImage();
+        cv::Mat imgTrack = use_deep_frontend ? featureTracker.getTrackImage()
+                                             : featureTrackerClassical.getTrackImage();
         pubTrackImage(imgTrack, t);
     }
 
@@ -391,8 +395,10 @@ void Estimator::processMeasurements()
 
             double estimation_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::high_resolution_clock::now() - t_backend_start).count();
-            double extraction_ms = featureTracker.last_extraction_ms;
-            double matching_ms   = featureTracker.last_matching_ms;
+            double extraction_ms = use_deep_frontend ? featureTracker.last_extraction_ms
+                                                     : featureTrackerClassical.last_extraction_ms;
+            double matching_ms   = use_deep_frontend ? featureTracker.last_matching_ms
+                                                     : featureTrackerClassical.last_matching_ms;
             double frontend_ms   = extraction_ms + matching_ms;
 
             // Write unified per-frame timing to CSV

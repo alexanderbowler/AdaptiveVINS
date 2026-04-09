@@ -240,15 +240,15 @@ void cam_switch_callback(const std_msgs::BoolConstPtr &switch_msg)
 int main(int argc, char **argv)
 {
     
-    ros::init(argc, argv, "supervins_estimator");
+    ros::init(argc, argv, "adaptivevins_estimator");
     ros::NodeHandle n("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
 
     if(argc != 2)
     {
-        printf("please intput: rosrun supervins supervins_node [config file] \n"
-               "for example: upervins supervins_node"
-               "~/catkin_ws/src/SuperVINS/config/euroc/euroc_mono_imu_config.yaml \n");
+        printf("please intput: rosrun adaptivevins adaptivevins_node [config file] \n"
+               "for example: adaptivevins adaptivevins_node"
+               "~/catkin_ws/src/AdaptiveVINS/config/euroc/euroc_mono_imu_config.yaml \n");
         return 1;
     }
 

@@ -1,0 +1,38 @@
+ssh into PC using tailscale:
+ssh jrkernan@jrkernan-b450m-ds3h
+
+
+
+source ~/catkin_ws/devel/setup.bash
+
+Terminal 1: roslaunch adaptivevins adaptivevins_rviz.launch
+
+Terminal 2 (from AdaptiveVINS dir for correct CSV path):
+cd ~/catkin_ws/src/AdaptiveVINS
+rosrun adaptivevins adaptivevins_node ~/catkin_ws/src/AdaptiveVINS/config/euroc/euroc_mono_imu_config.yaml
+
+Terminal 3: rosbag play ~/data/euroc/V1_01_easy.bag
+
+
+
+To track GPU usage (run before playing bag):
+nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader -l 1 > time_consumption/gpu_log.csv
+
+
+
+To analyze timing:
+cd ~/catkin_ws/src
+python3 analyze_timing.py --model adaptivevins
+python3 analyze_timing.py --model supervins --model vinsfusion --model adaptivevins
+
+
+
+To compare ATE/APE:
+
+Convert ground truth to TUM format (one time only):
+evo_traj euroc ~/data/vicon_room1/V1_01_easy/mav0/state_groundtruth_estimate0/data.csv --save_as_tum
+
+Run APE:
+evo_ape tum ~/data/vicon_room1/V1_01_easy/mav0/state_groundtruth_estimate0/data.tum \
+    ~/catkin_ws/src/AdaptiveVINS/adaptivevins_estimator/vio_output/vio.csv \
+    --align --plot

@@ -162,7 +162,8 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         reduceVector(cur_pts, status);
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
-        ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
+        last_matching_ms = t_o.toc();
+        ROS_DEBUG("temporal optical flow costs: %fms", last_matching_ms);
     }
 
     // Increment track count for all successfully tracked features
@@ -191,7 +192,8 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         }
         else
             n_pts.clear();
-        ROS_DEBUG("detect feature costs: %f ms", t_t.toc());
+        last_extraction_ms = t_t.toc();
+        ROS_DEBUG("detect feature costs: %f ms", last_extraction_ms);
 
         for (auto &p : n_pts)
         {

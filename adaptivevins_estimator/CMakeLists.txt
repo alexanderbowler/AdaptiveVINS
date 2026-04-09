@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(supervins)
+project(adaptivevins)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++14")
@@ -36,7 +36,7 @@ include_directories(
 
 catkin_package()
 
-add_library(supervins_lib
+add_library(adaptivevins_lib
     src/estimator/parameters.cpp
     src/estimator/estimator.cpp
     src/estimator/feature_manager.cpp
@@ -56,13 +56,13 @@ add_library(supervins_lib
     src/featureTracker/feature_tracker_dpl.cpp
     src/featureTracker/extractor_matcher_dpl.cpp
     src/featureTracker/transform_dpl.cpp)
-target_link_libraries(supervins_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} onnxruntime)
+target_link_libraries(adaptivevins_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} onnxruntime)
 
 
 get_filename_component(PROJECT_SOURCE_DIR_ABS "${CMAKE_SOURCE_DIR}" ABSOLUTE)
-add_executable(supervins_node src/supervins_main.cpp)
-target_compile_definitions(supervins_node PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR_ABS}")
-target_link_libraries(supervins_node supervins_lib) 
+add_executable(adaptivevins_node src/adaptivevins_main.cpp)
+target_compile_definitions(adaptivevins_node PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR_ABS}")
+target_link_libraries(adaptivevins_node adaptivevins_lib) 
 
 # add_executable(kitti_odom_test src/KITTIOdomTest.cpp )
 # target_link_libraries(kitti_odom_test vins_lib -pthread) 

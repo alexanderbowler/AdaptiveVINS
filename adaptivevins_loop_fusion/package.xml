@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package>
-  <name>supervins_loop_fusion</name>
+  <name>adaptivevins_loop_fusion</name>
   <version>0.0.0</version>
-  <description>supervins_loop_fusion package</description>
+  <description>adaptivevins_loop_fusion package</description>
 
   <!-- One maintainer tag required, multiple allowed, one person per tag --> 
   <!-- Example:  -->

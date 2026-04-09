@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(supervins_loop_fusion)
+project(adaptivevins_loop_fusion)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++14")
@@ -44,7 +44,7 @@ include_directories(${catkin_INCLUDE_DIRS} ${CERES_INCLUDE_DIRS}  ${EIGEN3_INCLU
 
 catkin_package()
 
-add_executable(supervins_loop_fusion_node
+add_executable(adaptivevins_loop_fusion_node
     src/pose_graph_node.cpp
     src/pose_graph.cpp
     src/keyframe.cpp
@@ -75,7 +75,7 @@ add_executable(supervins_loop_fusion_node
     ${DBOW3_SOURCE}
     )
 get_filename_component(PROJECT_SOURCE_DIR_ABS "${CMAKE_SOURCE_DIR}" ABSOLUTE)
-target_compile_definitions(supervins_loop_fusion_node PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR_ABS}")
-target_link_libraries(supervins_loop_fusion_node ${catkin_LIBRARIES}  ${OpenCV_LIBS} ${CERES_LIBRARIES}  ${OpenCV_LIBRARIES} onnxruntime) 
+target_compile_definitions(adaptivevins_loop_fusion_node PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR_ABS}")
+target_link_libraries(adaptivevins_loop_fusion_node ${catkin_LIBRARIES}  ${OpenCV_LIBS} ${CERES_LIBRARIES}  ${OpenCV_LIBRARIES} onnxruntime) 
 
 
