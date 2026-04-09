@@ -1,3 +1,8 @@
+ssh into PC using tailscale:
+ssh jrkernan@jrkernan-b450m-ds3h
+
+
+
 source ~/catkin_ws/devel/setup.bash
 
 Terminal 1: roslaunch supervins supervins_rviz.launch
