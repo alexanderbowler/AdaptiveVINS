@@ -9,3 +9,20 @@ Terminal 3: rosbag play ~/data/euroc/V1_01_easy.bag
 
 
 To track GPU usage: nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader -l 1 > time_consumption/gpu_log.csv
+
+
+
+To compare ATE/APE:
+
+
+
+Convert ground truth to TUM format:
+
+evo_traj euroc ~/data/vicon_room1/V1_01_easy/mav0/state_groundtruth_estimate0/data.csv --save_as_tum
+(Make sure to change the dataset path)
+
+Run APE plots:
+
+evo_ape tum data.tum \
+    ~/catkin_ws/src/SuperVINS/supervins_estimator/vio_output/vio.csv \
+    --align --plot
