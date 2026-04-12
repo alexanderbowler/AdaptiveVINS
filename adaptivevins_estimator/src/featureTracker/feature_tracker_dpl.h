@@ -87,6 +87,9 @@ public:
     // Per-frame timing (milliseconds); populated by trackImage_dpl(), read by estimator
     double last_extraction_ms = 0.0;
     double last_matching_ms   = 0.0;
+    // Difficulty signals — populated by trackImage_dpl(), read by estimator
+    int   last_tracked_count = 0;    // LightGlue matches surviving RANSAC this frame
+    float last_inlier_ratio  = 1.0f; // RANSAC inliers / pre-RANSAC candidates; 1 if first frame
 
     int extractor_type = 0;
     int descriptor_size = 256;

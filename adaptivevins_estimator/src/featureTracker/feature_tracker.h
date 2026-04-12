@@ -85,4 +85,7 @@ public:
     // Per-frame timing (milliseconds); populated by trackImage(), read by estimator
     double last_extraction_ms = 0.0;
     double last_matching_ms   = 0.0;
+    // Difficulty signals — populated by trackImage(), read by estimator
+    int   last_tracked_count = 0;    // total features in cur frame (tracked + newly detected)
+    float last_inlier_ratio  = 1.0f; // tracked / prev_pts before new detection; 1 if no prev frame
 };

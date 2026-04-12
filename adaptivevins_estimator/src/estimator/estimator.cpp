@@ -172,24 +172,132 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 {
     inputImageCnt++;
 
-    // Hardcoded mid-bag front-end swap for validation.
-    // Change SWAP_AT to adjust when the switch occurs.
-    static const int SWAP_AT = 1400;
-    static bool swap_done = false;
-    if (!swap_done && inputImageCnt == SWAP_AT)
+    // Signal the GPU logger (in main) that the rosbag has started delivering data
+    if (inputImageCnt == 1)
+        BAG_STARTED.store(true);
+
+    // =========================================================================
+    // ADAPTIVE FRONT-END SWITCHING — difficulty score + hysteresis
+    // =========================================================================
+    // --- Tunable normalization bounds (calibrate against your sequence) ---
+    static constexpr int    FEAT_MIN   = 20;    // below this → full difficulty
+    static constexpr int    FEAT_MAX   = 200;   // above this → no difficulty
+    static constexpr double BRIGHT_MIN = 50.0;  // very dark (uint8 mean)
+    static constexpr double BRIGHT_MAX = 200.0; // well-lit
+    static constexpr double BLUR_MIN   = 10.0;  // very blurry (low Laplacian variance)
+    static constexpr double BLUR_MAX   = 200.0; // sharp
+
+    // --- Hysteresis thresholds ---
+    static constexpr double DIFF_HIGH  = 0.6;   // classical → deep when score > this
+    static constexpr double DIFF_LOW   = 0.35;  // deep → classical when score < this
+
+    // --- Per-signal weights (sum to 1.0) ---
+    static constexpr double W_FEAT   = 0.35;
+    static constexpr double W_INLIER = 0.35;
+    static constexpr double W_BRIGHT = 0.15;
+    static constexpr double W_BLUR   = 0.15;
+
+    // --- Image-based signals (current frame, computed before tracking) ---
+    double brightness = cv::mean(_img)[0];
+    cv::Mat lap;
+    cv::Laplacian(_img, lap, CV_64F);
+    cv::Scalar mean_lap, std_lap;
+    cv::meanStdDev(lap, mean_lap, std_lap);
+    double blur_score = std_lap[0] * std_lap[0]; // variance of Laplacian = sharpness
+
+    // --- Tracker-based signals from the PREVIOUS frame ---
+    int   prev_feat_count   = use_deep_frontend ? featureTracker.last_tracked_count
+                                                : featureTrackerClassical.last_tracked_count;
+    float prev_inlier_ratio = use_deep_frontend ? featureTracker.last_inlier_ratio
+                                                : featureTrackerClassical.last_inlier_ratio;
+
+    // --- Normalize to [0,1] where 1 = hardest ---
+    auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v)); };
+    double n_feat   = clamp01(1.0 - (prev_feat_count  - FEAT_MIN)   / (double)(FEAT_MAX   - FEAT_MIN));
+    double n_inlier = clamp01(1.0 - prev_inlier_ratio);
+    double n_bright = clamp01(1.0 - (brightness        - BRIGHT_MIN) / (BRIGHT_MAX - BRIGHT_MIN));
+    double n_blur   = clamp01(1.0 - (blur_score        - BLUR_MIN)   / (BLUR_MAX   - BLUR_MIN));
+
+    double difficulty = W_FEAT * n_feat + W_INLIER * n_inlier + W_BRIGHT * n_bright + W_BLUR * n_blur;
+
+    // Minimum frames to stay in a mode before switching again.
+    // Prevents score contamination on the first frame after a switch
+    // (e.g. deep returning 300 features immediately dropping the score).
+    static constexpr int MIN_DWELL = 10;
+    static int frames_in_mode = 0;
+    ++frames_in_mode;
+
+    // --- Hysteresis switching ---
+    bool switched = false;
+    bool to_deep  = false;
+    if (frames_in_mode > MIN_DWELL)
     {
-        use_deep_frontend = !use_deep_frontend;
-        swap_done = true;
-        // Forward the new tracker's n_id past the old tracker's to prevent
-        // feature ID collisions in the sliding window.
-        if (use_deep_frontend)
+        if (!use_deep_frontend && difficulty > DIFF_HIGH)
+        {
+            use_deep_frontend = true;
             featureTracker.n_id = featureTrackerClassical.n_id + 1;
-        else
+            // Clear stale previous-frame state so the deep tracker starts
+            // fresh (detect-only on the first frame after the switch).
+            featureTracker.prev_pts.clear();
+            featureTracker.prev_dplpts_descriptors.clear();
+            switched = true; to_deep = true;
+            ++total_switch_count;
+            frames_in_mode = 0;
+        }
+        else if (use_deep_frontend && difficulty < DIFF_LOW)
+        {
+            use_deep_frontend = false;
             featureTrackerClassical.n_id = featureTracker.n_id + 1;
-        ROS_WARN("AdaptiveVINS: front-end SWAP at image %d -> %s",
-                 inputImageCnt,
-                 use_deep_frontend ? "DEEP (SuperPoint+LightGlue)" : "CLASSICAL (FAST+optical flow)");
+            // Clear stale previous-frame state so the classical tracker
+            // re-detects from scratch on the first frame after the switch.
+            featureTrackerClassical.prev_pts.clear();
+            switched = true; to_deep = false;
+            ++total_switch_count;
+            frames_in_mode = 0;
+        }
     }
+
+    // --- Mode frame counters ---
+    if (use_deep_frontend) ++deep_frame_count;
+    else                   ++classical_frame_count;
+
+    // --- Per-frame log (verbose mode only) ---
+    if (VERBOSE_LOGGING)
+    {
+        const char* mode_str = use_deep_frontend ? "DEEP     " : "CLASSICAL";
+        printf("[AdaptiveVINS] #%4d | mode=%-9s | "
+               "feat=%3d(n=%.2f) inlier=%.2f(n=%.2f) bright=%5.1f(n=%.2f) blur=%7.1f(n=%.2f) | "
+               "difficulty=%.3f\n",
+               inputImageCnt, mode_str,
+               prev_feat_count,   n_feat,
+               prev_inlier_ratio, n_inlier,
+               brightness,        n_bright,
+               blur_score,        n_blur,
+               difficulty);
+
+        // Periodic mode distribution summary (every 50 input frames)
+        if (inputImageCnt % 50 == 0)
+        {
+            int total = classical_frame_count + deep_frame_count;
+            printf("[AdaptiveVINS] --- summary @ frame %d: CLASSICAL=%d (%.0f%%) DEEP=%d (%.0f%%) switches=%d ---\n",
+                   inputImageCnt,
+                   classical_frame_count, total > 0 ? 100.0 * classical_frame_count / total : 0.0,
+                   deep_frame_count,      total > 0 ? 100.0 * deep_frame_count      / total : 0.0,
+                   total_switch_count);
+        }
+    }
+
+    // --- Mode switch banner (always shown regardless of verbose) ---
+    if (switched)
+    {
+        printf("=================================================================\n");
+        if (to_deep)
+            printf("=== MODE SWITCH: CLASSICAL -> DEEP  (score=%.3f > %.2f) ===\n", difficulty, DIFF_HIGH);
+        else
+            printf("=== MODE SWITCH: DEEP -> CLASSICAL  (score=%.3f < %.2f) ===\n", difficulty, DIFF_LOW);
+        printf("=================================================================\n");
+    }
+    // =========================================================================
 
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
@@ -401,33 +509,38 @@ void Estimator::processMeasurements()
                                                      : featureTrackerClassical.last_matching_ms;
             double frontend_ms   = extraction_ms + matching_ms;
 
-            // Write unified per-frame timing to CSV
-            static bool csv_header_written = false;
+            // Write unified per-frame timing to CSV.
+            // First write each run: truncate (overwrite). Subsequent writes: append.
+            static bool timing_initialized = false;
             static bool dir_created = false;
             if (!dir_created)
             {
                 mkdir("time_consumption", 0755);
                 dir_created = true;
             }
-            std::ofstream timingFile("time_consumption/timing_log.csv", std::ios::app);
-            if (timingFile.is_open())
             {
-                if (!csv_header_written)
+                std::ios_base::openmode mode = timing_initialized
+                                               ? std::ios::app
+                                               : (std::ios::out | std::ios::trunc);
+                std::ofstream timingFile("time_consumption/timing_log.csv", mode);
+                if (timingFile.is_open())
                 {
-                    timingFile << "timestamp,frontend_ms,extraction_ms,matching_ms,estimation_ms\n";
-                    csv_header_written = true;
+                    if (!timing_initialized)
+                    {
+                        timingFile << "timestamp,frontend_ms,extraction_ms,matching_ms,estimation_ms\n";
+                        timing_initialized = true;
+                    }
+                    timingFile << std::fixed << std::setprecision(6)
+                               << feature.first << ","
+                               << frontend_ms   << ","
+                               << extraction_ms << ","
+                               << matching_ms   << ","
+                               << estimation_ms << "\n";
                 }
-                timingFile << std::fixed << std::setprecision(6)
-                           << feature.first << ","
-                           << frontend_ms   << ","
-                           << extraction_ms << ","
-                           << matching_ms   << ","
-                           << estimation_ms << "\n";
-                timingFile.close();
-            }
-            else
-            {
-                std::cerr << "Unable to open timing_log.csv" << std::endl;
+                else
+                {
+                    std::cerr << "Unable to open timing_log.csv" << std::endl;
+                }
             }
 
             prevTime = curTime;

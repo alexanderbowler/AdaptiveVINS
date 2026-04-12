@@ -14,6 +14,9 @@
 #include <map>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <chrono>
+#include <sys/stat.h>
 #include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
@@ -258,11 +261,18 @@ int main(int argc, char **argv)
     // Load parameters (camera, IMU, feature, etc.) into variables in parameters.cpp
     readParameters(config_file);
 
+    // Verbose logging: per-frame difficulty metrics.
+    // Enable with:  rosrun adaptivevins adaptivevins_node config.yaml _verbose:=true
+    // or add <param name="verbose" value="true"/> to your launch file.
+    n.param<bool>("verbose", VERBOSE_LOGGING, false);
+    ROS_INFO("verbose logging: %s", VERBOSE_LOGGING ? "ON" : "OFF");
+
     // Set global model weight paths
     std::string project_source_dir = PROJECT_SOURCE_DIR;
     extractor_weight_global_path = project_source_dir + "/" + extractor_weight_relative_path;
     matcher_weight_global_path = project_source_dir + "/" + matcher_weight_relative_path;
     VINS_RESULT_PATH = project_source_dir + "/" + VINS_RESULT_PATH;
+    { std::ofstream f(VINS_RESULT_PATH, std::ios::out); } // truncate on each run
 
     // Set estimator parameters; if multi-thread mode is enabled, the estimation thread is started inside setParameter()
     estimator.setParameter();
@@ -296,7 +306,46 @@ int main(int argc, char **argv)
 
     // Start synchronization thread
     std::thread sync_thread{sync_process};
+
+    // ---- Integrated GPU logger ----
+    // Polls nvidia-smi once per second for the duration of the node.
+    // Writes to time_consumption/gpu_log.csv (overwritten each run).
+    // Format matches what analyze_timing.py expects: "75 %, 2048 MiB"
+    mkdir("time_consumption", 0755);
+    // Truncate the file now so it's empty even if nvidia-smi is unavailable
+    { FILE* f = fopen("time_consumption/gpu_log.csv", "w"); if (f) fclose(f); }
+
+    std::atomic<bool> gpu_logging_active{true};
+    std::thread gpu_logger([&gpu_logging_active]() {
+        // Wait until the first image frame arrives so GPU usage reflects
+        // actual inference, not ONNX model loading.
+        while (!BAG_STARTED.load() && gpu_logging_active.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        while (gpu_logging_active.load())
+        {
+            FILE* pipe = popen(
+                "nvidia-smi --query-gpu=utilization.gpu,memory.used "
+                "--format=csv,noheader 2>/dev/null", "r");
+            if (pipe)
+            {
+                char buf[128];
+                if (fgets(buf, sizeof(buf), pipe))
+                {
+                    FILE* out = fopen("time_consumption/gpu_log.csv", "a");
+                    if (out) { fputs(buf, out); fclose(out); }
+                }
+                pclose(pipe);
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    });
+
     ros::spin();
+
+    // Stop GPU logger cleanly
+    gpu_logging_active.store(false);
+    gpu_logger.join();
 
     return 0;
 

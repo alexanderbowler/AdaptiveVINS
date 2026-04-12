@@ -115,10 +115,15 @@ class Estimator
     FeatureTrackerDPL featureTracker;          // deep front-end: SuperPoint + LightGlue
     FeatureTracker    featureTrackerClassical; // classical front-end: FAST + optical flow
 
-    // Hardcoded front-end selector.
+    // Active front-end selector — updated each frame by the adaptive difficulty logic.
     // true  = deep (SuperPoint + LightGlue)
     // false = classical (FAST + optical flow)
     bool use_deep_frontend = false;
+
+    // Adaptive mode distribution counters (accumulated over the run)
+    int classical_frame_count = 0;
+    int deep_frame_count      = 0;
+    int total_switch_count    = 0;
 
     SolverFlag solver_flag;
     MarginalizationFlag  marginalization_flag;

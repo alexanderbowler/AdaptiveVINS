@@ -188,19 +188,28 @@ void FeatureTrackerDPL::match_features_dpl(cv::Mat prev_img_, cv::Mat cur_img_, 
         points2.push_back(cur_dplpts_normalized[match.second]);
     }
 
+    int n_pre_ransac = static_cast<int>(tem_matches.size());
+
+    // findFundamentalMat requires at least 8 point correspondences.
+    // If we have fewer (stale state after a mode switch, or texture-poor frame),
+    // accept all LightGlue matches without geometric verification.
+    if (n_pre_ransac < 8)
+    {
+        result_matches = tem_matches;
+        last_inlier_ratio = (n_pre_ransac > 0) ? 1.0f : 0.0f;
+        return;
+    }
+
     // RANSAC fundamental matrix estimation to filter outliers
     std::vector<uchar> inliersMask;
-    cv::Mat fundamentalMatrix = cv::findFundamentalMat(points1, points2, cv::FM_RANSAC, ransacReprojThreshold, 0.99, inliersMask);
+    cv::findFundamentalMat(points1, points2, cv::FM_RANSAC, ransacReprojThreshold, 0.99, inliersMask);
 
-    // Keep only inlier matches
-    std::vector<pair<int, int>> inlierMatches;
-    for (int i = 0; i < inliersMask.size(); ++i)
+    for (int i = 0; i < (int)inliersMask.size(); ++i)
     {
         if (inliersMask[i])
-        {
             result_matches.push_back(tem_matches[i]);
-        }
     }
+    last_inlier_ratio = static_cast<float>(result_matches.size()) / n_pre_ransac;
 }
 
 void FeatureTrackerDPL::match_with_predictions_dpl(cv::Mat prev_img_, cv::Mat cur_img_, vector<pair<cv::Point2f, vector<float>>> &prev_dplpts_descriptors_, vector<pair<cv::Point2f, vector<float>>> &cur_dplpts_descriptors_, vector<cv::Point2f> &predict_pts_, vector<cv::Point2f> &cur_pts_, vector<pair<int, int>> &result_matches,double &ransacReprojThreshold)
@@ -382,8 +391,8 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTrackerDPL::trac
         }
 
         // the number of matched points
-        int n_matches = matches.size();
-        // cout << n_matches <<" points matched in current frame" <<endl;
+        int n_matches = static_cast<int>(matches.size());
+        last_tracked_count = n_matches; // RANSAC-surviving matches (difficulty signal)
 
         // first, save the successfully matched points in the temporary vector
         for (int i = 0; i < n_matches; i++)

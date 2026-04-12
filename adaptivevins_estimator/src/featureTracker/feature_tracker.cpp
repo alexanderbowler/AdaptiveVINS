@@ -110,6 +110,9 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     */
     cur_pts.clear();
 
+    // Capture prev count before tracking for inlier ratio computation
+    int n_prev_pts = static_cast<int>(prev_pts.size());
+
     // Cannot track without features from the previous frame
     if (prev_pts.size() > 0)
     {
@@ -170,6 +173,12 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     for (auto &n : track_cnt)
         n++;
 
+    // Inlier ratio: proportion of previous features that survived optical flow + checks.
+    // Computed before new detection so it purely reflects tracking quality.
+    last_inlier_ratio = (n_prev_pts > 0)
+                        ? static_cast<float>(cur_pts.size()) / n_prev_pts
+                        : 1.0f;
+
     if (1)
     {
         ROS_DEBUG("set mask begins");
@@ -202,6 +211,8 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
             track_cnt.push_back(1); // new features start with track count = 1
         }
     }
+
+    last_tracked_count = static_cast<int>(cur_pts.size()); // tracked + newly detected
 
     // Undistort and back-project to normalized plane; returns normalized coordinates
     cur_un_pts = undistortedPts(cur_pts, m_camera[0]);

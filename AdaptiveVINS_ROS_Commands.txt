@@ -10,6 +10,7 @@ Terminal 1: roslaunch adaptivevins adaptivevins_rviz.launch
 Terminal 2 (from AdaptiveVINS dir for correct CSV path):
 cd ~/catkin_ws/src/AdaptiveVINS
 rosrun adaptivevins adaptivevins_node ~/catkin_ws/src/AdaptiveVINS/config/euroc/euroc_mono_imu_config.yaml
+rosrun adaptivevins adaptivevins_node ~/catkin_ws/src/AdaptiveVINS/config/euroc/euroc_mono_imu_config.yaml _verbose:=true
 
 Terminal 3: rosbag play ~/data/euroc/V1_01_easy.bag
 
@@ -36,3 +37,7 @@ Run APE:
 evo_ape tum ~/data/vicon_room1/V1_01_easy/mav0/state_groundtruth_estimate0/data.tum \
     ~/catkin_ws/src/AdaptiveVINS/adaptivevins_estimator/vio_output/vio.csv \
     --align --plot
+
+evo_ape tum ~/data/vicon_room1/V1_03_difficult/mav0/state_groundtruth_estimate0/data.tum \
+    ~/catkin_ws/src/AdaptiveVINS/adaptivevins_estimator/vio_output/vio.csv \
+    --align --plot    

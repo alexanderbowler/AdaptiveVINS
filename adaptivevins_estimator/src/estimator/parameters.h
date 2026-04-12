@@ -11,6 +11,7 @@
 
 #include <ros/ros.h>
 #include <vector>
+#include <atomic>
 #include <eigen3/Eigen/Dense>
 #include "../utility/utility.h"
 #include <opencv2/opencv.hpp>
@@ -98,6 +99,8 @@ extern string extractor_weight_relative_path; //path to load deep-learning featu
 extern string matcher_weight_relative_path; //path to load deep-learning feature matcher weight
 extern  double ransacReprojThreshold;
 extern float MATCHER_THRESHOLD;
+extern bool VERBOSE_LOGGING;               // enable per-frame difficulty metrics; set via ROS param ~verbose
+extern std::atomic<bool> BAG_STARTED;      // set true on first inputImage(); gates GPU logger
 
 enum ExtractorType //deep-learning based feautre extractor type
 {

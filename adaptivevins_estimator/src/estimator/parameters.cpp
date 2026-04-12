@@ -54,6 +54,8 @@ string matcher_weight_relative_path;
 
 float MATCHER_THRESHOLD;
 double ransacReprojThreshold;
+bool VERBOSE_LOGGING = false;
+std::atomic<bool> BAG_STARTED{false};
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
