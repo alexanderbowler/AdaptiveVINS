@@ -143,8 +143,9 @@ void FeatureTrackerDPL::match_features_dpl(cv::Mat prev_img_, cv::Mat cur_img_, 
     vector<cv::Point2f> prev_dplpts, cur_dplpts;
     prev_dplpts.reserve(n_pre);
     cur_dplpts.reserve(n_cur);
-    float prev_descriptors[n_pre * descriptor_size];
-    float cur_descriptors[n_cur * descriptor_size];
+    // Heap-allocate descriptor buffers — VLAs here can exceed 1MB and overflow the stack.
+    vector<float> prev_descriptors(n_pre * descriptor_size);
+    vector<float> cur_descriptors(n_cur * descriptor_size);
 
     for (int i = 0; i < n_pre; i++)
     {
@@ -175,10 +176,17 @@ void FeatureTrackerDPL::match_features_dpl(cv::Mat prev_img_, cv::Mat cur_img_, 
     vector<cv::Point2f> cur_dplpts_normalized = FeatureMatcherDPL->pre_process(cur_dplpts, cur_img_.rows, cur_img_.cols);
 
     // Run deep learning feature matching
-    vector<pair<int, int>> tem_matches;
-    tem_matches = FeatureMatcherDPL->match_featurepoints(prev_dplpts_normalized, cur_dplpts_normalized, prev_descriptors, cur_descriptors);
+    vector<pair<int, int>> raw_matches;
+    raw_matches = FeatureMatcherDPL->match_featurepoints(prev_dplpts_normalized, cur_dplpts_normalized, prev_descriptors.data(), cur_descriptors.data());
 
-    // std::cout<<"tem_matches size = "<<tem_matches.size()<<std::endl;
+    // LightGlue uses -1 as a sentinel for unmatched keypoints. Filter out any
+    // match where either index is out of bounds before touching any arrays.
+    vector<pair<int, int>> tem_matches;
+    for (const auto &m : raw_matches)
+    {
+        if (m.first >= 0 && m.first < n_pre && m.second >= 0 && m.second < n_cur)
+            tem_matches.push_back(m);
+    }
 
     // Extract matched point pairs for RANSAC
     vector<cv::Point2f> points1, points2;
@@ -219,8 +227,9 @@ void FeatureTrackerDPL::match_with_predictions_dpl(cv::Mat prev_img_, cv::Mat cu
     vector<cv::Point2f> prev_dplpts, cur_dplpts;
     prev_dplpts.reserve(n_pre);
     cur_dplpts.reserve(n_cur);
-    float prev_descriptors[n_pre * descriptor_size];
-    float cur_descriptors[n_cur * descriptor_size];
+    // Heap-allocate descriptor buffers — VLAs here can exceed 1MB and overflow the stack.
+    vector<float> prev_descriptors(n_pre * descriptor_size);
+    vector<float> cur_descriptors(n_cur * descriptor_size);
 
     for (int i = 0; i < n_pre; i++)
     {
@@ -249,22 +258,37 @@ void FeatureTrackerDPL::match_with_predictions_dpl(cv::Mat prev_img_, cv::Mat cu
     vector<cv::Point2f> prev_dplpts_normalized = FeatureMatcherDPL->pre_process(prev_dplpts, prev_img_.rows, prev_img_.cols);
     vector<cv::Point2f> cur_dplpts_normalized = FeatureMatcherDPL->pre_process(cur_dplpts, cur_img_.rows, cur_img_.cols);
 
-    vector<pair<int, int>> matches = FeatureMatcherDPL->match_featurepoints(prev_dplpts_normalized, cur_dplpts_normalized, prev_descriptors, cur_descriptors);
-    // RANSAC fundamental matrix estimation
-    std::vector<uchar> inliersMask;
-    cv::Mat fundamentalMatrix = cv::findFundamentalMat(prev_dplpts_normalized, cur_dplpts_normalized, cv::FM_RANSAC, ransacReprojThreshold, 0.99, inliersMask);
+    // Filter out LightGlue sentinel (-1) and out-of-bounds indices before use.
+    vector<pair<int, int>> raw_matches_pred = FeatureMatcherDPL->match_featurepoints(prev_dplpts_normalized, cur_dplpts_normalized, prev_descriptors.data(), cur_descriptors.data());
+    vector<pair<int, int>> matches;
+    for (const auto &m : raw_matches_pred)
+    {
+        if (m.first >= 0 && m.first < n_pre && m.second >= 0 && m.second < n_cur)
+            matches.push_back(m);
+    }
 
-    // Keep only inlier matches
-    std::vector<cv::Point2f> inlierPrevPts, inlierCurPts;
-    std::vector<pair<int, int>> inlierMatches;
-    for (int i = 0; i < inliersMask.size(); ++i)
+    // Build paired point arrays from filtered matches for RANSAC.
+    // (RANSAC must operate on corresponding pairs, not on all keypoints.)
+    vector<cv::Point2f> points1, points2;
+    for (const auto &m : matches)
+    {
+        points1.push_back(prev_dplpts_normalized[m.first]);
+        points2.push_back(cur_dplpts_normalized[m.second]);
+    }
+
+    if ((int)matches.size() < 8)
+    {
+        result_matches = matches;
+        return;
+    }
+
+    std::vector<uchar> inliersMask;
+    cv::findFundamentalMat(points1, points2, cv::FM_RANSAC, ransacReprojThreshold, 0.99, inliersMask);
+
+    for (int i = 0; i < (int)inliersMask.size(); ++i)
     {
         if (inliersMask[i])
-        {
-            inlierPrevPts.push_back(prev_dplpts_normalized[i]);
-            inlierCurPts.push_back(cur_dplpts_normalized[i]);
             result_matches.push_back(matches[i]);
-        }
     }
 }
 
