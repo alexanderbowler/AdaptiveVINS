@@ -174,168 +174,199 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 
     // Signal the GPU logger (in main) that the rosbag has started delivering data
     if (inputImageCnt == 1)
+    {
         BAG_STARTED.store(true);
+        // Truncate aug_log.csv at start of each run
+        mkdir("time_consumption", 0755);
+        std::ofstream aug_init("time_consumption/aug_log.csv", std::ios::out | std::ios::trunc);
+        aug_init << "timestamp,difficulty,n_classical,augmented,n_aug_features,mean_track_len\n";
+    }
 
     // =========================================================================
-    // ADAPTIVE FRONT-END SWITCHING — difficulty score + hysteresis
+    // HYBRID FRONT-END — classical always runs; deep augments sparse regions
     // =========================================================================
-    // --- Tunable normalization bounds (calibrate against your sequence) ---
-    static constexpr int    FEAT_MIN   = 20;    // below this → full difficulty
-    static constexpr int    FEAT_MAX   = 200;   // above this → no difficulty
-    static constexpr double BRIGHT_MIN = 50.0;  // very dark (uint8 mean)
-    static constexpr double BRIGHT_MAX = 200.0; // well-lit
-    static constexpr double BLUR_MIN   = 10.0;  // very blurry (low Laplacian variance)
-    static constexpr double BLUR_MAX   = 200.0; // sharp
 
-    // --- Hysteresis thresholds ---
-    static constexpr double DIFF_HIGH  = 0.6;   // classical → deep when score > this
-    static constexpr double DIFF_LOW   = 0.35;  // deep → classical when score < this
+    // Difficulty signals from the previous frame's classical tracker
+    static constexpr int    FEAT_MIN    = 20;
+    static constexpr int    FEAT_MAX    = 200;
+    static constexpr double TRACK_MIN   = 2.0;   // mean track len this short = struggling
+    static constexpr double TRACK_MAX   = 12.0;  // mean track len this long  = healthy
+    static constexpr double W_FEAT      = 1.0 / 3.0;
+    static constexpr double W_INLIER    = 1.0 / 3.0;
+    static constexpr double W_TRACK     = 1.0 / 3.0;
 
-    // --- Per-signal weights (sum to 1.0) ---
-    static constexpr double W_FEAT   = 0.35;
-    static constexpr double W_INLIER = 0.35;
-    static constexpr double W_BRIGHT = 0.15;
-    static constexpr double W_BLUR   = 0.15;
+    int   prev_feat_count   = featureTrackerClassical.last_tracked_count;
+    float prev_inlier_ratio = featureTrackerClassical.last_inlier_ratio;
 
-    // --- Image-based signals (current frame, computed before tracking) ---
-    double brightness = cv::mean(_img)[0];
-    cv::Mat lap;
-    cv::Laplacian(_img, lap, CV_64F);
-    cv::Scalar mean_lap, std_lap;
-    cv::meanStdDev(lap, mean_lap, std_lap);
-    double blur_score = std_lap[0] * std_lap[0]; // variance of Laplacian = sharpness
+    // Mean track length: average number of consecutive frames each feature has survived
+    double mean_track_len = 1.0;
+    if (!featureTrackerClassical.track_cnt.empty())
+    {
+        double sum = 0.0;
+        for (int c : featureTrackerClassical.track_cnt) sum += c;
+        mean_track_len = sum / featureTrackerClassical.track_cnt.size();
+    }
 
-    // --- Tracker-based signals from the PREVIOUS frame ---
-    int   prev_feat_count   = use_deep_frontend ? featureTracker.last_tracked_count
-                                                : featureTrackerClassical.last_tracked_count;
-    float prev_inlier_ratio = use_deep_frontend ? featureTracker.last_inlier_ratio
-                                                : featureTrackerClassical.last_inlier_ratio;
-
-    // --- Normalize to [0,1] where 1 = hardest ---
     auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v)); };
-    double n_feat   = clamp01(1.0 - (prev_feat_count  - FEAT_MIN)   / (double)(FEAT_MAX   - FEAT_MIN));
+    double n_feat   = clamp01(1.0 - (prev_feat_count - FEAT_MIN) / (double)(FEAT_MAX - FEAT_MIN));
     double n_inlier = clamp01(1.0 - prev_inlier_ratio);
-    double n_bright = clamp01(1.0 - (brightness        - BRIGHT_MIN) / (BRIGHT_MAX - BRIGHT_MIN));
-    double n_blur   = clamp01(1.0 - (blur_score        - BLUR_MIN)   / (BLUR_MAX   - BLUR_MIN));
+    double n_track  = clamp01(1.0 - (mean_track_len - TRACK_MIN) / (TRACK_MAX - TRACK_MIN));
+    double difficulty = W_FEAT * n_feat + W_INLIER * n_inlier + W_TRACK * n_track;
 
-    double difficulty = W_FEAT * n_feat + W_INLIER * n_inlier + W_BRIGHT * n_bright + W_BLUR * n_blur;
+    // Threshold above which deep augmentation fires
+    // Set to -1.0 to force augmentation every frame (test mode)
+    static constexpr double AUGMENT_THRESHOLD = -1.0;
 
-    // Minimum frames to stay in a mode before switching again.
-    // Prevents score contamination on the first frame after a switch
-    // (e.g. deep returning 300 features immediately dropping the score).
-    static constexpr int MIN_DWELL = 10;
-    static int frames_in_mode = 0;
-    ++frames_in_mode;
+    // Deep feature IDs are offset to prevent collision with classical IDs
+    static constexpr int DEEP_ID_OFFSET = 1000000;
 
-    // --- Hysteresis switching ---
-    bool switched = false;
-    bool to_deep  = false;
-    if (frames_in_mode > MIN_DWELL)
-    {
-        if (!use_deep_frontend && difficulty > DIFF_HIGH)
-        {
-            use_deep_frontend = true;
-            featureTracker.n_id = featureTrackerClassical.n_id + 1;
-            // Clear stale previous-frame state so the deep tracker starts
-            // fresh (detect-only on the first frame after the switch).
-            featureTracker.prev_pts.clear();
-            featureTracker.prev_dplpts_descriptors.clear();
-            switched = true; to_deep = true;
-            ++total_switch_count;
-            frames_in_mode = 0;
-        }
-        else if (use_deep_frontend && difficulty < DIFF_LOW)
-        {
-            use_deep_frontend = false;
-            featureTrackerClassical.n_id = featureTracker.n_id + 1;
-            // Clear stale previous-frame state so the classical tracker
-            // re-detects from scratch on the first frame after the switch.
-            featureTrackerClassical.prev_pts.clear();
-            switched = true; to_deep = false;
-            ++total_switch_count;
-            frames_in_mode = 0;
-        }
-    }
-
-    // --- Mode frame counters ---
-    if (use_deep_frontend) ++deep_frame_count;
-    else                   ++classical_frame_count;
-
-    // --- Per-frame log (verbose mode only) ---
-    if (VERBOSE_LOGGING)
-    {
-        const char* mode_str = use_deep_frontend ? "DEEP     " : "CLASSICAL";
-        printf("[AdaptiveVINS] #%4d | mode=%-9s | "
-               "feat=%3d(n=%.2f) inlier=%.2f(n=%.2f) bright=%5.1f(n=%.2f) blur=%7.1f(n=%.2f) | "
-               "difficulty=%.3f\n",
-               inputImageCnt, mode_str,
-               prev_feat_count,   n_feat,
-               prev_inlier_ratio, n_inlier,
-               brightness,        n_bright,
-               blur_score,        n_blur,
-               difficulty);
-
-        // Periodic mode distribution summary (every 50 input frames)
-        if (inputImageCnt % 50 == 0)
-        {
-            int total = classical_frame_count + deep_frame_count;
-            printf("[AdaptiveVINS] --- summary @ frame %d: CLASSICAL=%d (%.0f%%) DEEP=%d (%.0f%%) switches=%d ---\n",
-                   inputImageCnt,
-                   classical_frame_count, total > 0 ? 100.0 * classical_frame_count / total : 0.0,
-                   deep_frame_count,      total > 0 ? 100.0 * deep_frame_count      / total : 0.0,
-                   total_switch_count);
-        }
-    }
-
-    // --- Mode switch banner (always shown regardless of verbose) ---
-    if (switched)
-    {
-        printf("=================================================================\n");
-        if (to_deep)
-            printf("=== MODE SWITCH: CLASSICAL -> DEEP  (score=%.3f > %.2f) ===\n", difficulty, DIFF_HIGH);
-        else
-            printf("=== MODE SWITCH: DEEP -> CLASSICAL  (score=%.3f < %.2f) ===\n", difficulty, DIFF_LOW);
-        printf("=================================================================\n");
-    }
-    // =========================================================================
-
+    // -------------------------------------------------------------------------
+    // Step 1 — Always run classical front-end (FAST + optical flow)
+    // -------------------------------------------------------------------------
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
 
-    if (use_deep_frontend)
-    {
-        // --- Deep front-end: SuperPoint + LightGlue ---
-        if (_img1.empty())
-            featureFrame = featureTracker.trackImage_dpl(t, _img);
-        else
-            featureFrame = featureTracker.trackImage_dpl(t, _img, _img1);
-
-        // Buffer SuperPoint descriptors (used by loop closure)
-        vector<pair<cv::Point2f, vector<float>>> kptAndDescriptors = featureTracker.cur_dplpts_descriptors;
-        cv::Mat descriptors(kptAndDescriptors.size(), 256, CV_32FC1);
-        for (int i = 0; i < (int)kptAndDescriptors.size(); i++)
-            for (int j = 0; j < 256; j++)
-                descriptors.at<float>(i, j) = kptAndDescriptors[i].second[j];
-        mSuperPointDescriptors.lock();
-        SuperPointDescriptorsBuf.push(make_pair(t, descriptors));
-        mSuperPointDescriptors.unlock();
-    }
+    if (_img1.empty())
+        featureFrame = featureTrackerClassical.trackImage(t, _img);
     else
+        featureFrame = featureTrackerClassical.trackImage(t, _img, _img1);
+
+    // -------------------------------------------------------------------------
+    // Step 2 — Conditionally augment with SuperPoint in sparse regions
+    // -------------------------------------------------------------------------
+    int n_classical = (int)featureTrackerClassical.prev_pts.size();
+    // In forced-augmentation mode guarantee at least 20 deep features per frame
+    static constexpr int MIN_DEEP_BUDGET = 50;
+    int n_gap = std::max(MAX_CNT - n_classical, MIN_DEEP_BUDGET);
+
+    if (difficulty > AUGMENT_THRESHOLD && solver_flag == NON_LINEAR)
     {
-        // --- Classical front-end: FAST + optical flow ---
-        // No descriptor buffering (loop closure disabled in classical mode)
-        if (_img1.empty())
-            featureFrame = featureTrackerClassical.trackImage(t, _img);
-        else
-            featureFrame = featureTrackerClassical.trackImage(t, _img, _img1);
+        // Ensure the deep tracker knows the image dimensions (normally set in trackImage,
+        // but in hybrid mode we never call that — so set them here from the live image)
+        featureTracker.row = _img.rows;
+        featureTracker.col = _img.cols;
+
+        // Build a mask that blocks regions already covered by classical features
+        cv::Mat aug_mask(featureTrackerClassical.row, featureTrackerClassical.col,
+                         CV_8UC1, cv::Scalar(255));
+        for (const auto &pt : featureTrackerClassical.prev_pts)
+            cv::circle(aug_mask, pt, MIN_DIST, 0, -1);
+
+        // Extract SuperPoint keypoints in unoccupied regions
+        vector<cv::Point2f> deep_pts;
+        vector<pair<cv::Point2f, vector<float>>> deep_descs;
+        featureTracker.goodFeaturesToTrack_dpl(_img, deep_pts, deep_descs,
+                                               n_gap, 0.005, MIN_DIST, aug_mask);
+
+        if (!deep_pts.empty())
+        {
+            // Undistort + back-project to normalized plane
+            vector<cv::Point2f> deep_un_pts =
+                featureTrackerClassical.undistortedPts(deep_pts, featureTrackerClassical.m_camera[0]);
+
+            for (int i = 0; i < (int)deep_pts.size(); i++)
+            {
+                int fid = DEEP_ID_OFFSET + deep_aug_n_id++;
+
+                // Add to this frame's feature map so the backend sees it on frame N
+                // Velocity is 0 — first observation, no previous position to diff against
+                Eigen::Matrix<double, 7, 1> xyz_uv_vel;
+                xyz_uv_vel << deep_un_pts[i].x, deep_un_pts[i].y, 1.0,
+                              deep_pts[i].x,    deep_pts[i].y,    0.0, 0.0;
+                featureFrame[fid].emplace_back(0, xyz_uv_vel);
+
+                // Inject into classical tracker state so optical flow tracks
+                // these features in frame N+1 onward — no deep inference needed
+                featureTrackerClassical.prev_pts.push_back(deep_pts[i]);
+                featureTrackerClassical.prev_un_pts.push_back(deep_un_pts[i]);
+                featureTrackerClassical.ids.push_back(fid);
+                featureTrackerClassical.track_cnt.push_back(1);
+                // Update position maps so velocity can be computed next frame
+                featureTrackerClassical.prev_un_pts_map[fid] = deep_un_pts[i];
+                featureTrackerClassical.prevLeftPtsMap[fid]  = deep_pts[i];
+            }
+
+            // Cap the classical tracker state so injected deep features don't
+            // accumulate across frames and overflow the backend's NUM_OF_F budget.
+            // Prefer to remove deep-injected features (ID >= DEEP_ID_OFFSET) over
+            // classical ones, since classical features have accumulated parallax.
+            if ((int)featureTrackerClassical.prev_pts.size() > MAX_CNT)
+            {
+                // Build index list of deep features, sorted by track_cnt ascending
+                // (shortest-lived deep features removed first)
+                vector<int> deep_indices;
+                for (int k = 0; k < (int)featureTrackerClassical.ids.size(); k++)
+                    if (featureTrackerClassical.ids[k] >= DEEP_ID_OFFSET)
+                        deep_indices.push_back(k);
+
+                int to_remove = (int)featureTrackerClassical.prev_pts.size() - MAX_CNT;
+                // Mark indices to erase (from deep pool first, back-to-front to preserve indices)
+                set<int> erase_set;
+                for (int k = (int)deep_indices.size() - 1;
+                     k >= 0 && (int)erase_set.size() < to_remove; k--)
+                    erase_set.insert(deep_indices[k]);
+
+                // Erase in reverse order to keep indices valid
+                for (auto it = erase_set.rbegin(); it != erase_set.rend(); ++it)
+                {
+                    int k = *it;
+                    featureTrackerClassical.prev_pts.erase(featureTrackerClassical.prev_pts.begin() + k);
+                    featureTrackerClassical.prev_un_pts.erase(featureTrackerClassical.prev_un_pts.begin() + k);
+                    featureTrackerClassical.ids.erase(featureTrackerClassical.ids.begin() + k);
+                    featureTrackerClassical.track_cnt.erase(featureTrackerClassical.track_cnt.begin() + k);
+                }
+            }
+
+            ++aug_frame_count;
+            printf("[AdaptiveVINS] #%4d | AUGMENTED +%d deep features | "
+                   "classical=%d difficulty=%.3f aug_frames=%d\n",
+                   inputImageCnt, (int)deep_pts.size(),
+                   n_classical, difficulty, aug_frame_count);
+
+            // Buffer descriptors for loop closure
+            cv::Mat descriptors((int)deep_descs.size(), 256, CV_32FC1);
+            for (int i = 0; i < (int)deep_descs.size(); i++)
+                for (int j = 0; j < 256; j++)
+                    descriptors.at<float>(i, j) = deep_descs[i].second[j];
+            mSuperPointDescriptors.lock();
+            SuperPointDescriptorsBuf.push(make_pair(t, descriptors));
+            mSuperPointDescriptors.unlock();
+        }
     }
+
+    // Write per-frame augmentation log
+    {
+        int n_aug = (int)featureFrame.size() - (int)featureTrackerClassical.prev_pts.size()
+                    + (/* injected this frame */ 0); // approximate: tracked below
+        // Count aug features: featureFrame entries with ID >= DEEP_ID_OFFSET
+        int n_aug_in_frame = 0;
+        for (const auto &kv : featureFrame)
+            if (kv.first >= DEEP_ID_OFFSET) n_aug_in_frame++;
+
+        std::ofstream aug_log("time_consumption/aug_log.csv", std::ios::app);
+        if (aug_log.is_open())
+        {
+            aug_log << std::fixed << std::setprecision(6)
+                    << t << ","
+                    << difficulty << ","
+                    << n_classical << ","
+                    << (n_aug_in_frame > 0 ? 1 : 0) << ","
+                    << n_aug_in_frame << ","
+                    << mean_track_len << "\n";
+        }
+    }
+
+    if (VERBOSE_LOGGING)
+    {
+        printf("[AdaptiveVINS] #%4d | feat=%3d inlier=%.2f difficulty=%.3f | "
+               "augment=%s\n",
+               inputImageCnt, prev_feat_count, prev_inlier_ratio, difficulty,
+               difficulty > AUGMENT_THRESHOLD ? "YES" : "no");
+    }
+    // =========================================================================
 
     if (SHOW_TRACK)
-    {
-        cv::Mat imgTrack = use_deep_frontend ? featureTracker.getTrackImage()
-                                             : featureTrackerClassical.getTrackImage();
-        pubTrackImage(imgTrack, t);
-    }
+        pubTrackImage(featureTrackerClassical.getTrackImage(), t);
 
     // If multi-thread mode is on, processMeasurements() is already running in its own thread;
     // just push the new feature frame into featureBuf
@@ -503,10 +534,11 @@ void Estimator::processMeasurements()
 
             double estimation_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::high_resolution_clock::now() - t_backend_start).count();
-            double extraction_ms = use_deep_frontend ? featureTracker.last_extraction_ms
-                                                     : featureTrackerClassical.last_extraction_ms;
-            double matching_ms   = use_deep_frontend ? featureTracker.last_matching_ms
-                                                     : featureTrackerClassical.last_matching_ms;
+            // Classical always runs; deep augmentation timing is additive when it fires
+            double extraction_ms = featureTrackerClassical.last_extraction_ms
+                                 + featureTracker.last_extraction_ms;
+            double matching_ms   = featureTrackerClassical.last_matching_ms
+                                 + featureTracker.last_matching_ms;
             double frontend_ms   = extraction_ms + matching_ms;
 
             // Write unified per-frame timing to CSV.
