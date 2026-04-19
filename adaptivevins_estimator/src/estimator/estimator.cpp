@@ -234,29 +234,9 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
     double difficulty = W_FEAT * n_feat + W_INLIER * n_inlier + W_TRACK * n_track
                       + W_BLUR * n_blur + W_BRIGHT * n_bright;
 
-    // Hysteresis: once augmentation fires, keep it running until difficulty
-    // drops below the low threshold. Prevents rapid on/off switching that
-    // breaks deep feature tracks. MIN_DWELL prevents switching back immediately
-    // after turn-on (first frame after activation skews signals).
-    static constexpr double AUG_THRESH_HIGH = 0.25;  // turn augmentation ON
-    static constexpr double AUG_THRESH_LOW  = 0.12;  // turn augmentation OFF
-    static constexpr int    MIN_DWELL       = 10;     // min frames per state
-    static bool aug_active     = false;
-    static int  frames_in_mode = 0;
-    ++frames_in_mode;
-    if (frames_in_mode > MIN_DWELL)
-    {
-        if (!aug_active && difficulty > AUG_THRESH_HIGH)
-        {
-            aug_active     = true;
-            frames_in_mode = 0;
-        }
-        else if (aug_active && difficulty < AUG_THRESH_LOW)
-        {
-            aug_active     = false;
-            frames_in_mode = 0;
-        }
-    }
+    // AugmentedVINS branch: always augment after initialization.
+    // Classical front-end always runs; deep pipeline runs every frame post-init.
+    static bool aug_active = true;
 
     // Deep feature IDs are offset to prevent collision with classical IDs
     static constexpr int DEEP_ID_OFFSET = 1000000;
