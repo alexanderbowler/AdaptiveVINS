@@ -65,6 +65,8 @@ void FeatureTrackerDPL::goodFeaturesToTrack_dpl(cv::Mat img, vector<cv::Point2f>
     int n = result_dplpts_descriptors.first.size();
     for (int i = 0; i < n; i++)
     {
+        if (max_num > 0 && (int)pts.size() >= max_num)
+            break;
         cv::Point2f dplpt = result_dplpts_descriptors.first[i];
         cv::Point2f pt = cv::Point2f((dplpt.x + 0.5) / FeatureExtractorDPL->scale - 0.5, (dplpt.y + 0.5) / FeatureExtractorDPL->scale - 0.5);
         if (!inBorder(pt))

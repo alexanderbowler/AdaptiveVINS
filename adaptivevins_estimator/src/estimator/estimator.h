@@ -115,15 +115,13 @@ class Estimator
     FeatureTrackerDPL featureTracker;          // deep front-end: SuperPoint + LightGlue
     FeatureTracker    featureTrackerClassical; // classical front-end: FAST + optical flow
 
-    // Active front-end selector — updated each frame by the adaptive difficulty logic.
-    // true  = deep (SuperPoint + LightGlue)
-    // false = classical (FAST + optical flow)
-    bool use_deep_frontend = false;
+    // Counter for deep-augmented feature IDs.
+    // IDs are offset by DEEP_ID_OFFSET (1,000,000) to avoid collisions with
+    // classical feature IDs which start at 0.
+    int deep_aug_n_id = 0;
 
-    // Adaptive mode distribution counters (accumulated over the run)
-    int classical_frame_count = 0;
-    int deep_frame_count      = 0;
-    int total_switch_count    = 0;
+    // How many frames deep augmentation has fired (for logging)
+    int aug_frame_count = 0;
 
     SolverFlag solver_flag;
     MarginalizationFlag  marginalization_flag;
