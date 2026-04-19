@@ -179,26 +179,34 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
         // Truncate aug_log.csv at start of each run
         mkdir("time_consumption", 0755);
         std::ofstream aug_init("time_consumption/aug_log.csv", std::ios::out | std::ios::trunc);
-        aug_init << "timestamp,difficulty,n_classical,augmented,n_aug_features,mean_track_len\n";
+        aug_init << "timestamp,difficulty,n_feat,n_inlier,n_track,n_blur,n_bright,blur_var,brightness,n_classical,augmented,n_aug_features,mean_track_len\n";
     }
 
     // =========================================================================
     // HYBRID FRONT-END — classical always runs; deep augments sparse regions
     // =========================================================================
 
-    // Difficulty signals from the previous frame's classical tracker
+    // Difficulty signals — weights and bounds matched to original AdaptiveVINS
+    // calibration (commit b7f7033), plus track-length as an additional signal.
     static constexpr int    FEAT_MIN    = 20;
     static constexpr int    FEAT_MAX    = 200;
-    static constexpr double TRACK_MIN   = 2.0;   // mean track len this short = struggling
-    static constexpr double TRACK_MAX   = 12.0;  // mean track len this long  = healthy
-    static constexpr double W_FEAT      = 1.0 / 3.0;
-    static constexpr double W_INLIER    = 1.0 / 3.0;
-    static constexpr double W_TRACK     = 1.0 / 3.0;
+    static constexpr double TRACK_MIN   = 2.0;
+    static constexpr double TRACK_MAX   = 8.0;
+    static constexpr double BRIGHT_MIN  = 50.0;   // below = dark / struggling
+    static constexpr double BRIGHT_MAX  = 200.0;  // above = well-lit / fine
+    static constexpr double BLUR_MIN    = 10.0;   // below = very blurry
+    static constexpr double BLUR_MAX    = 200.0;  // above = sharp
+
+    static constexpr double W_FEAT      = 0.30;
+    static constexpr double W_INLIER    = 0.30;
+    static constexpr double W_TRACK     = 0.15;
+    static constexpr double W_BLUR      = 0.15;
+    static constexpr double W_BRIGHT    = 0.10;
 
     int   prev_feat_count   = featureTrackerClassical.last_tracked_count;
     float prev_inlier_ratio = featureTrackerClassical.last_inlier_ratio;
 
-    // Mean track length: average number of consecutive frames each feature has survived
+    // Mean track length
     double mean_track_len = 1.0;
     if (!featureTrackerClassical.track_cnt.empty())
     {
@@ -207,15 +215,48 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
         mean_track_len = sum / featureTrackerClassical.track_cnt.size();
     }
 
-    auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v)); };
-    double n_feat   = clamp01(1.0 - (prev_feat_count - FEAT_MIN) / (double)(FEAT_MAX - FEAT_MIN));
-    double n_inlier = clamp01(1.0 - prev_inlier_ratio);
-    double n_track  = clamp01(1.0 - (mean_track_len - TRACK_MIN) / (TRACK_MAX - TRACK_MIN));
-    double difficulty = W_FEAT * n_feat + W_INLIER * n_inlier + W_TRACK * n_track;
+    // Image blur: Laplacian variance — low = blurry (motion blur / defocus)
+    cv::Mat lap;
+    cv::Laplacian(_img, lap, CV_64F);
+    cv::Scalar mean_lap, std_lap;
+    cv::meanStdDev(lap, mean_lap, std_lap);
+    double blur_var = std_lap[0] * std_lap[0];
 
-    // Threshold above which deep augmentation fires
-    // Set to -1.0 to force augmentation every frame (test mode)
-    static constexpr double AUGMENT_THRESHOLD = -1.0;
+    // Image brightness: darker = harder (matches original EuRoC calibration)
+    cv::Scalar mean_bright = cv::mean(_img);
+
+    auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v)); };
+    double n_feat   = clamp01(1.0 - (prev_feat_count  - FEAT_MIN)   / (double)(FEAT_MAX  - FEAT_MIN));
+    double n_inlier = clamp01(1.0 - prev_inlier_ratio);
+    double n_track  = clamp01(1.0 - (mean_track_len   - TRACK_MIN)  / (TRACK_MAX - TRACK_MIN));
+    double n_blur   = clamp01(1.0 - (blur_var          - BLUR_MIN)   / (BLUR_MAX  - BLUR_MIN));
+    double n_bright = clamp01(1.0 - (mean_bright[0]    - BRIGHT_MIN) / (BRIGHT_MAX - BRIGHT_MIN));
+    double difficulty = W_FEAT * n_feat + W_INLIER * n_inlier + W_TRACK * n_track
+                      + W_BLUR * n_blur + W_BRIGHT * n_bright;
+
+    // Hysteresis: once augmentation fires, keep it running until difficulty
+    // drops below the low threshold. Prevents rapid on/off switching that
+    // breaks deep feature tracks. MIN_DWELL prevents switching back immediately
+    // after turn-on (first frame after activation skews signals).
+    static constexpr double AUG_THRESH_HIGH = 0.25;  // turn augmentation ON
+    static constexpr double AUG_THRESH_LOW  = 0.12;  // turn augmentation OFF
+    static constexpr int    MIN_DWELL       = 10;     // min frames per state
+    static bool aug_active     = false;
+    static int  frames_in_mode = 0;
+    ++frames_in_mode;
+    if (frames_in_mode > MIN_DWELL)
+    {
+        if (!aug_active && difficulty > AUG_THRESH_HIGH)
+        {
+            aug_active     = true;
+            frames_in_mode = 0;
+        }
+        else if (aug_active && difficulty < AUG_THRESH_LOW)
+        {
+            aug_active     = false;
+            frames_in_mode = 0;
+        }
+    }
 
     // Deep feature IDs are offset to prevent collision with classical IDs
     static constexpr int DEEP_ID_OFFSET = 1000000;
@@ -223,6 +264,12 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
     // -------------------------------------------------------------------------
     // Step 1 — Always run classical front-end (FAST + optical flow)
     // -------------------------------------------------------------------------
+    // Reset deep tracker timings each frame — they are only updated when
+    // trackImage_dpl is actually called. Without this reset, stale values from
+    // the last augmented frame would inflate timing on every non-augmented frame.
+    featureTracker.last_extraction_ms = 0.0;
+    featureTracker.last_matching_ms   = 0.0;
+
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
 
@@ -232,105 +279,57 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
         featureFrame = featureTrackerClassical.trackImage(t, _img, _img1);
 
     // -------------------------------------------------------------------------
-    // Step 2 — Conditionally augment with SuperPoint in sparse regions
+    // Step 2 — Conditionally augment with full SuperPoint + LightGlue pipeline
     // -------------------------------------------------------------------------
+    // featureTracker (FeatureTrackerDPL) maintains its own state across frames:
+    // it extracts SuperPoint on the current image and matches with LightGlue
+    // against the previous frame's keypoints — exactly like the full deep pipeline.
+    // We merge its output into featureFrame using an ID offset so there are no
+    // collisions with the classical feature IDs.
     int n_classical = (int)featureTrackerClassical.prev_pts.size();
-    // In forced-augmentation mode guarantee at least 20 deep features per frame
-    static constexpr int MIN_DEEP_BUDGET = 50;
-    int n_gap = std::max(MAX_CNT - n_classical, MIN_DEEP_BUDGET);
 
-    if (difficulty > AUGMENT_THRESHOLD && solver_flag == NON_LINEAR)
+    // Track the last frame index at which deep augmentation fired, so we can
+    // detect gaps and reset the deep tracker's stale state.
+    // If augmentation skips more than MAX_DEEP_GAP frames, prev_dplpts_descriptors
+    // is too old for LightGlue to match reliably — clear prev_pts to force a
+    // clean re-initialisation (extraction only, no matches on that one frame).
+    static constexpr int MAX_DEEP_GAP = 3;
+    static int last_deep_frame = -1;
+
+    if (aug_active && solver_flag == NON_LINEAR)
     {
-        // Ensure the deep tracker knows the image dimensions (normally set in trackImage,
-        // but in hybrid mode we never call that — so set them here from the live image)
-        featureTracker.row = _img.rows;
-        featureTracker.col = _img.cols;
+        if (last_deep_frame >= 0 && (inputImageCnt - last_deep_frame) > MAX_DEEP_GAP)
 
-        // Build a mask that blocks regions already covered by classical features
-        cv::Mat aug_mask(featureTrackerClassical.row, featureTrackerClassical.col,
-                         CV_8UC1, cv::Scalar(255));
-        for (const auto &pt : featureTrackerClassical.prev_pts)
-            cv::circle(aug_mask, pt, MIN_DIST, 0, -1);
-
-        // Extract SuperPoint keypoints in unoccupied regions
-        vector<cv::Point2f> deep_pts;
-        vector<pair<cv::Point2f, vector<float>>> deep_descs;
-        featureTracker.goodFeaturesToTrack_dpl(_img, deep_pts, deep_descs,
-                                               n_gap, 0.005, MIN_DIST, aug_mask);
-
-        if (!deep_pts.empty())
         {
-            // Undistort + back-project to normalized plane
-            vector<cv::Point2f> deep_un_pts =
-                featureTrackerClassical.undistortedPts(deep_pts, featureTrackerClassical.m_camera[0]);
+            featureTracker.prev_pts.clear();
+            featureTracker.prev_dplpts_descriptors.clear();
+            ROS_WARN("[AdaptiveVINS] deep tracker gap %d frames — forcing re-init",
+                     inputImageCnt - last_deep_frame);
+        }
+        last_deep_frame = inputImageCnt;
 
-            for (int i = 0; i < (int)deep_pts.size(); i++)
-            {
-                int fid = DEEP_ID_OFFSET + deep_aug_n_id++;
+        auto deepFrame = (_img1.empty())
+            ? featureTracker.trackImage_dpl(t, _img)
+            : featureTracker.trackImage_dpl(t, _img, _img1);
 
-                // Add to this frame's feature map so the backend sees it on frame N
-                // Velocity is 0 — first observation, no previous position to diff against
-                Eigen::Matrix<double, 7, 1> xyz_uv_vel;
-                xyz_uv_vel << deep_un_pts[i].x, deep_un_pts[i].y, 1.0,
-                              deep_pts[i].x,    deep_pts[i].y,    0.0, 0.0;
-                featureFrame[fid].emplace_back(0, xyz_uv_vel);
+        // Cap deep features to avoid overflowing the backend's NUM_OF_F budget.
+        // Keep the first MAX_DEEP_FEATURES matches (LightGlue orders by confidence).
+        static constexpr int MAX_DEEP_FEATURES = 100;
+        int n_deep = 0;
+        for (auto &[fid, obs] : deepFrame)
+        {
+            if (n_deep >= MAX_DEEP_FEATURES) break;
+            featureFrame[DEEP_ID_OFFSET + fid] = obs;
+            ++n_deep;
+        }
 
-                // Inject into classical tracker state so optical flow tracks
-                // these features in frame N+1 onward — no deep inference needed
-                featureTrackerClassical.prev_pts.push_back(deep_pts[i]);
-                featureTrackerClassical.prev_un_pts.push_back(deep_un_pts[i]);
-                featureTrackerClassical.ids.push_back(fid);
-                featureTrackerClassical.track_cnt.push_back(1);
-                // Update position maps so velocity can be computed next frame
-                featureTrackerClassical.prev_un_pts_map[fid] = deep_un_pts[i];
-                featureTrackerClassical.prevLeftPtsMap[fid]  = deep_pts[i];
-            }
-
-            // Cap the classical tracker state so injected deep features don't
-            // accumulate across frames and overflow the backend's NUM_OF_F budget.
-            // Prefer to remove deep-injected features (ID >= DEEP_ID_OFFSET) over
-            // classical ones, since classical features have accumulated parallax.
-            if ((int)featureTrackerClassical.prev_pts.size() > MAX_CNT)
-            {
-                // Build index list of deep features, sorted by track_cnt ascending
-                // (shortest-lived deep features removed first)
-                vector<int> deep_indices;
-                for (int k = 0; k < (int)featureTrackerClassical.ids.size(); k++)
-                    if (featureTrackerClassical.ids[k] >= DEEP_ID_OFFSET)
-                        deep_indices.push_back(k);
-
-                int to_remove = (int)featureTrackerClassical.prev_pts.size() - MAX_CNT;
-                // Mark indices to erase (from deep pool first, back-to-front to preserve indices)
-                set<int> erase_set;
-                for (int k = (int)deep_indices.size() - 1;
-                     k >= 0 && (int)erase_set.size() < to_remove; k--)
-                    erase_set.insert(deep_indices[k]);
-
-                // Erase in reverse order to keep indices valid
-                for (auto it = erase_set.rbegin(); it != erase_set.rend(); ++it)
-                {
-                    int k = *it;
-                    featureTrackerClassical.prev_pts.erase(featureTrackerClassical.prev_pts.begin() + k);
-                    featureTrackerClassical.prev_un_pts.erase(featureTrackerClassical.prev_un_pts.begin() + k);
-                    featureTrackerClassical.ids.erase(featureTrackerClassical.ids.begin() + k);
-                    featureTrackerClassical.track_cnt.erase(featureTrackerClassical.track_cnt.begin() + k);
-                }
-            }
-
+        if (n_deep > 0)
+        {
             ++aug_frame_count;
-            printf("[AdaptiveVINS] #%4d | AUGMENTED +%d deep features | "
+            printf("[AdaptiveVINS] #%4d | AUGMENTED +%d SP+LG features | "
                    "classical=%d difficulty=%.3f aug_frames=%d\n",
-                   inputImageCnt, (int)deep_pts.size(),
+                   inputImageCnt, n_deep,
                    n_classical, difficulty, aug_frame_count);
-
-            // Buffer descriptors for loop closure
-            cv::Mat descriptors((int)deep_descs.size(), 256, CV_32FC1);
-            for (int i = 0; i < (int)deep_descs.size(); i++)
-                for (int j = 0; j < 256; j++)
-                    descriptors.at<float>(i, j) = deep_descs[i].second[j];
-            mSuperPointDescriptors.lock();
-            SuperPointDescriptorsBuf.push(make_pair(t, descriptors));
-            mSuperPointDescriptors.unlock();
         }
     }
 
@@ -349,6 +348,9 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
             aug_log << std::fixed << std::setprecision(6)
                     << t << ","
                     << difficulty << ","
+                    << n_feat << "," << n_inlier << "," << n_track << ","
+                    << n_blur << "," << n_bright << ","
+                    << blur_var << "," << mean_bright[0] << ","
                     << n_classical << ","
                     << (n_aug_in_frame > 0 ? 1 : 0) << ","
                     << n_aug_in_frame << ","
@@ -361,7 +363,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
         printf("[AdaptiveVINS] #%4d | feat=%3d inlier=%.2f difficulty=%.3f | "
                "augment=%s\n",
                inputImageCnt, prev_feat_count, prev_inlier_ratio, difficulty,
-               difficulty > AUGMENT_THRESHOLD ? "YES" : "no");
+               aug_active ? "YES" : "no");
     }
     // =========================================================================
 
